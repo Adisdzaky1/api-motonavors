@@ -52,7 +52,7 @@ def nav():
 
         return f"NAV:{arah}:{jarak_str}:{jalan[:20]}"
     except Exception as e:
-        return f"IDLE:0"
+        return f"IDLE:00"
 
 # if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
