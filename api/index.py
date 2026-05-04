@@ -1,13 +1,90 @@
 from flask import Flask, request
-import requests
+import requests, urllib.parse
 
 app = Flask(__name__)
-ORS_KEY = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImMyZjlmYTk3YWYxODQyNmQ5YzUxZDkxMGFhYzA2OGMxIiwiaCI6Im11cm11cjY0In0="
 
-HEADERS_NOMINATIM = {
-    'User-Agent': 'MotoNavApp/1.0 (navigasi motor pribadi)'
-}
+# Tidak perlu API key apapun!
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+OSRM_URL      = "https://router.project-osrm.org/route/v1/driving"
 
+HEADERS = {'User-Agent': 'MotoNavApp/1.0'}
+
+# ─────────────────────────────────────────
+#  GEOCODING — cari koordinat dari nama tempat
+# ─────────────────────────────────────────
+def geocode(nama_tempat):
+    # Coba 3 variasi query agar lebih akurat
+    queries = [
+        nama_tempat + ", Indonesia",
+        nama_tempat + ", Jawa Tengah, Indonesia",
+        nama_tempat,
+    ]
+    for q in queries:
+        try:
+            r = requests.get(
+                NOMINATIM_URL,
+                params={'q': q, 'format': 'json', 'limit': 1, 'countrycodes': 'id'},
+                headers=HEADERS,
+                timeout=10
+            )
+            data = r.json()
+            if data:
+                return {
+                    'lat':  float(data[0]['lat']),
+                    'lng':  float(data[0]['lon']),
+                    'nama': data[0].get('display_name', nama_tempat).split(',')[0],
+                    'query_used': q
+                }
+        except:
+            continue
+    return None
+
+
+# ─────────────────────────────────────────
+#  ROUTING — ambil instruksi langkah pertama
+# ─────────────────────────────────────────
+def get_route(lat_asal, lng_asal, lat_tujuan, lng_tujuan):
+    url = f"{OSRM_URL}/{lng_asal},{lat_asal};{lng_tujuan},{lat_tujuan}"
+    r = requests.get(
+        url,
+        params={'steps': 'true', 'language': 'id', 'overview': 'false'},
+        headers=HEADERS,
+        timeout=10
+    )
+    return r.json()
+
+
+# ─────────────────────────────────────────
+#  DETEKSI ARAH dari teks instruksi
+# ─────────────────────────────────────────
+def deteksi_arah(instruksi):
+    s = instruksi.lower()
+    if any(k in s for k in ['kanan', 'right', 'turn right']):
+        return 'KANAN'
+    elif any(k in s for k in ['kiri', 'left', 'turn left']):
+        return 'KIRI'
+    elif any(k in s for k in ['tiba', 'sampai', 'destination', 'arrive', 'you have arrived']):
+        return 'TIBA'
+    elif any(k in s for k in ['putar balik', 'u-turn', 'uturn', 'balik']):
+        return 'BALIK'
+    elif any(k in s for k in ['bundaran', 'roundabout', 'rotary']):
+        return 'BUNDARAN'
+    else:
+        return 'LURUS'
+
+
+# ─────────────────────────────────────────
+#  FORMAT JARAK
+# ─────────────────────────────────────────
+def format_jarak(meter):
+    if meter >= 1000:
+        return f"{meter/1000:.1f}km"
+    return f"{int(meter)}m"
+
+
+# ═════════════════════════════════════════
+#  ENDPOINT UTAMA: /nav
+# ═════════════════════════════════════════
 @app.route('/nav')
 def nav():
     lat  = request.args.get('lat', '')
@@ -17,135 +94,110 @@ def nav():
     if not lat or not lng or not dest:
         return f"ERROR:PARAM_KOSONG|lat={lat}|lng={lng}|dest={dest}"
 
-    # ── Step 1: Geocode pakai Nominatim (OpenStreetMap) ──
+    # Step 1: Geocode tujuan
+    geo = geocode(dest)
+    if not geo:
+        return f"ERROR:LOKASI_TIDAK_DITEMUKAN|{dest}|Coba tulis lebih lengkap contoh: Pantai Sekar Hastina, Kebumen"
+
+    # Step 2: Ambil rute via OSRM
     try:
-        geo_resp = requests.get(
-            "https://nominatim.openstreetmap.org/search",
-            params={
-                'q': dest,
-                'format': 'json',
-                'limit': 1,
-                'countrycodes': 'id'   # prioritas Indonesia
-            },
-            headers=HEADERS_NOMINATIM,
-            timeout=10
-        )
+        rute = get_route(float(lat), float(lng), geo['lat'], geo['lng'])
 
-        if geo_resp.status_code != 200:
-            return f"ERROR:GEOCODE_HTTP_{geo_resp.status_code}"
+        if rute.get('code') != 'Ok':
+            return f"ERROR:RUTE_GAGAL|{rute.get('message','unknown')}"
 
-        geo = geo_resp.json()
+        langkah = rute['routes'][0]['legs'][0]['steps'][0]
+        instruksi = langkah.get('name', '') + ' ' + str(langkah.get('maneuver', {}).get('type', ''))
+        
+        # OSRM pakai maneuver type
+        maneuver  = langkah.get('maneuver', {})
+        man_type  = maneuver.get('type', '')
+        man_mod   = maneuver.get('modifier', '')
+        
+        instruksi_full = f"{man_type} {man_mod}"
+        jarak  = langkah.get('distance', 0)
+        jalan  = langkah.get('name', geo['nama'])
 
-        if not geo:
-            return f"ERROR:LOKASI_TIDAK_DITEMUKAN|dest={dest}"
-
-        dst_lat = float(geo[0]['lat'])
-        dst_lng = float(geo[0]['lon'])
-        nama_lokasi = geo[0].get('display_name', dest).split(',')[0]
-
-    except requests.exceptions.Timeout:
-        return "ERROR:GEOCODE_TIMEOUT"
-    except Exception as e:
-        return f"ERROR:GEOCODE|{str(e)[:100]}"
-
-    # ── Step 2: Ambil rute dari ORS ──
-    try:
-        route_resp = requests.post(
-            "https://api.openrouteservice.org/v2/directions/driving-car/json",
-            headers={
-                'Authorization': ORS_KEY,
-                'Content-Type': 'application/json'
-            },
-            json={
-                "coordinates": [
-                    [float(lng), float(lat)],
-                    [dst_lng, dst_lat]
-                ],
-                "language": "id"
-            },
-            timeout=10
-        )
-
-        if route_resp.status_code != 200:
-            return f"ERROR:ROUTE_HTTP_{route_resp.status_code}|{route_resp.text[:100]}"
-
-        r = route_resp.json()
-
-        if not r.get('routes'):
-            return f"ERROR:RUTE_KOSONG"
-
-        step      = r['routes'][0]['segments'][0]['steps'][0]
-        instruksi = step['instruction'].lower()
-        jarak     = step['distance']
-        jalan     = step.get('name', nama_lokasi)
-
-        # Format jarak
-        if jarak >= 1000:
-            jarak_str = f"{jarak/1000:.1f}km"
-        else:
-            jarak_str = f"{int(jarak)}m"
-
-        # Deteksi arah
-        if any(k in instruksi for k in ['kanan', 'right']):
+        # Deteksi arah dari maneuver
+        if 'right' in man_mod:
             arah = 'KANAN'
-        elif any(k in instruksi for k in ['kiri', 'left']):
+        elif 'left' in man_mod:
             arah = 'KIRI'
-        elif any(k in instruksi for k in ['tiba', 'destination', 'arrive']):
+        elif man_type in ['arrive', 'end of road']:
             arah = 'TIBA'
-        elif any(k in instruksi for k in ['putar', 'u-turn', 'balik']):
+        elif 'uturn' in man_mod or man_type == 'roundabout':
             arah = 'BALIK'
         else:
             arah = 'LURUS'
 
-        return f"NAV:{arah}:{jarak_str}:{jalan[:20]}"
+        jarak_str = format_jarak(jarak)
+        jalan_str = jalan[:20] if jalan else geo['nama'][:20]
+
+        return f"NAV:{arah}:{jarak_str}:{jalan_str}"
 
     except requests.exceptions.Timeout:
         return "ERROR:ROUTE_TIMEOUT"
-    except KeyError as e:
-        return f"ERROR:PARSE|key={str(e)}"
     except Exception as e:
-        return f"ERROR:ROUTE|{str(e)[:100]}"
+        return f"ERROR:ROUTE|{str(e)[:120]}"
 
 
+# ═════════════════════════════════════════
+#  ENDPOINT: /cari — test geocoding saja
+# ═════════════════════════════════════════
+@app.route('/cari')
+def cari():
+    dest = request.args.get('q', '')
+    if not dest:
+        return "ERROR:TULIS ?q=nama_tempat"
+
+    geo = geocode(dest)
+    if not geo:
+        return f"TIDAK_DITEMUKAN|{dest}"
+
+    return (f"DITEMUKAN|"
+            f"lat={geo['lat']}|"
+            f"lng={geo['lng']}|"
+            f"nama={geo['nama']}|"
+            f"query={geo['query_used']}")
+
+
+# ═════════════════════════════════════════
+#  ENDPOINT: /test — cek server hidup
+# ═════════════════════════════════════════
 @app.route('/test')
 def test():
-    return f"SERVER_OK|ORS_KEY_LENGTH:{len(ORS_KEY)}"
+    return "SERVER_OK|Engine:OSRM+Nominatim|NoAPIKey"
 
 
-@app.route('/testgeo')
-def testgeo():
-    # Test geocoding Nominatim dengan lokasi Kebumen
+# ═════════════════════════════════════════
+#  ENDPOINT: /testroute — test rute lengkap
+# ═════════════════════════════════════════
+@app.route('/testroute')
+def testroute():
+    # Dari pusat Kebumen ke Pantai Sekar Hastina
+    geo = geocode("Pantai Sekar Hastina Kebumen")
+    if not geo:
+        return "GEOCODE_GAGAL"
+
     try:
-        r = requests.get(
-            "https://nominatim.openstreetmap.org/search",
-            params={'q': 'Pantai Sekar Hastina Kebumen', 'format': 'json', 'limit': 1, 'countrycodes': 'id'},
-            headers=HEADERS_NOMINATIM,
-            timeout=10
-        )
-        data = r.json()
-        if data:
-            return f"GEO_OK|lat={data[0]['lat']}|lng={data[0]['lon']}|nama={data[0]['display_name'][:80]}"
-        else:
-            return "GEO_NOTFOUND|coba nama lain"
+        rute = get_route(-7.6733, 109.6519, geo['lat'], geo['lng'])
+        if rute.get('code') != 'Ok':
+            return f"ROUTE_GAGAL|{rute}"
+
+        step = rute['routes'][0]['legs'][0]['steps'][0]
+        total_km = rute['routes'][0]['distance'] / 1000
+        durasi_menit = rute['routes'][0]['duration'] / 60
+
+        return (f"ROUTE_OK|"
+                f"tujuan={geo['nama']}|"
+                f"total={total_km:.1f}km|"
+                f"estimasi={durasi_menit:.0f}menit|"
+                f"step1_type={step.get('maneuver',{}).get('type','')}|"
+                f"step1_jalan={step.get('name','?')}|"
+                f"step1_jarak={format_jarak(step.get('distance',0))}")
     except Exception as e:
-        return f"GEO_ERROR|{str(e)}"
+        return f"ERROR|{str(e)}"
 
 
-@app.route('/testors')
-def testors():
-    try:
-        r = requests.get(
-            "https://api.openrouteservice.org/geocode/search",
-            params={'api_key': ORS_KEY, 'text': 'Jakarta', 'size': 1},
-            timeout=10
-        )
-        if r.status_code == 200:
-            return f"ORS_KEY_VALID|status=200"
-        else:
-            return f"ORS_KEY_INVALID|status={r.status_code}|{r.text[:100]}"
-    except Exception as e:
-        return f"ORS_ERROR|{str(e)}"
-
-
-# if __name__ == '__main__':
+#if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
