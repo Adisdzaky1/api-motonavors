@@ -2,7 +2,7 @@ from flask import Flask, request
 import requests, re
 
 app = Flask(__name__)
-ORS_KEY = "GANTI_DENGAN_API_KEY_ORS_KAMU"
+ORS_KEY = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImMyZjlmYTk3YWYxODQyNmQ5YzUxZDkxMGFhYzA2OGMxIiwiaCI6Im11cm11cjY0In0="
 
 @app.route('/nav')
 def nav():
