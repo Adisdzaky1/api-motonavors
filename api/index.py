@@ -175,7 +175,7 @@ def test():
 @app.route('/testroute')
 def testroute():
     # Dari pusat Kebumen ke Pantai Sekar Hastina
-    geo = geocode("Pantai Sekar Hastina Kebumen")
+    geo = geocode("teluk penyu")
     if not geo:
         return "GEOCODE_GAGAL"
 
