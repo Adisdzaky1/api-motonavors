@@ -8,7 +8,7 @@ NOMINATIM_URL   = "https://nominatim.openstreetmap.org/search"
 ORS_GEOJSON_URL = "https://api.openrouteservice.org/v2/directions/driving-car/geojson"
 HEADERS_NOM     = {'User-Agent': 'MotoNavApp/1.0'}
 
-TIBA_RADIUS_M   = 5    # ≤ 8m dari tujuan → TIBA
+TIBA_RADIUS_M   = 10    # ≤ 8m dari tujuan → TIBA
 BELOK_RADIUS_M  = 15   # ≤ 15m dari titik belok → tampilkan instruksi belok
 
 
