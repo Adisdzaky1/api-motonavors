@@ -3,12 +3,13 @@ import requests, math
 
 app = Flask(__name__)
 
-ORS_KEY       = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImMyZjlmYTk3YWYxODQyNmQ5YzUxZDkxMGFhYzA2OGMxIiwiaCI6Im11cm11cjY0In0="
-NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
-# Pakai endpoint /geojson agar koordinat langsung tersedia
+ORS_KEY         = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImMyZjlmYTk3YWYxODQyNmQ5YzUxZDkxMGFhYzA2OGMxIiwiaCI6Im11cm11cjY0In0="
+NOMINATIM_URL   = "https://nominatim.openstreetmap.org/search"
 ORS_GEOJSON_URL = "https://api.openrouteservice.org/v2/directions/driving-car/geojson"
-HEADERS_NOM   = {'User-Agent': 'MotoNavApp/1.0'}
-TIBA_RADIUS_M = 8
+HEADERS_NOM     = {'User-Agent': 'MotoNavApp/1.0'}
+
+TIBA_RADIUS_M   = 5    # ≤ 8m dari tujuan → TIBA
+BELOK_RADIUS_M  = 15   # ≤ 15m dari titik belok → tampilkan instruksi belok
 
 
 def haversine(lat1, lng1, lat2, lng2):
@@ -44,69 +45,107 @@ def geocode(nama):
     return None
 
 
-# ── Request ORS pakai endpoint /geojson ─────────────
-# Format ini langsung return koordinat array tanpa encoding
 def get_rute_ors(lat_a, lng_a, lat_t, lng_t):
-    return requests.post(
-        ORS_GEOJSON_URL,
+    return requests.post(ORS_GEOJSON_URL,
         headers={'Authorization': ORS_KEY, 'Content-Type': 'application/json'},
-        json={
-            "coordinates":  [[lng_a, lat_a], [lng_t, lat_t]],
-            "language":     "en",
-            "instructions": True
-        },
-        timeout=15
-    )
+        json={"coordinates": [[lng_a, lat_a], [lng_t, lat_t]],
+              "language": "en", "instructions": True},
+        timeout=15)
 
 
-# ── Deteksi arah dari step type ORS ─────────────────
-# ORS step type: 0=left 1=right 2=sharp_left 3=sharp_right
-# 4=slight_left 5=slight_right 6=straight 7=roundabout
-# 10=arrive 11=depart
+# ── Deteksi arah dari step type ──────────────────────
 def deteksi_arah(instruksi, step_type):
-    if step_type in [0, 2, 4]:
-        return 'KIRI'
-    if step_type in [1, 3, 5]:
-        return 'KANAN'
-    if step_type == 7:
-        return 'BUNDARAN'
-    if step_type == 10:
-        return 'TIBA'
-    # Fallback teks
+    if step_type in [0, 2, 4]:   return 'KIRI'
+    if step_type in [1, 3, 5]:   return 'KANAN'
+    if step_type == 7:            return 'BUNDARAN'
+    if step_type == 10:           return 'TIBA'
     s = instruksi.lower()
-    if any(k in s for k in ['turn right', 'sharp right', 'slight right']):
-        return 'KANAN'
-    if any(k in s for k in ['turn left', 'sharp left', 'slight left']):
-        return 'KIRI'
-    if any(k in s for k in ['u-turn', 'uturn', 'balik']):
-        return 'BALIK'
-    if any(k in s for k in ['arrive', 'destination']):
-        return 'TIBA'
+    if any(k in s for k in ['turn right', 'sharp right', 'slight right']): return 'KANAN'
+    if any(k in s for k in ['turn left',  'sharp left',  'slight left']):  return 'KIRI'
+    if any(k in s for k in ['u-turn', 'uturn']):                           return 'BALIK'
+    if any(k in s for k in ['arrive', 'destination']):                     return 'TIBA'
     return 'LURUS'
 
 
-# ── Cari step aktif pakai way_points + GeoJSON coords ─
-def cari_step_aktif(steps, lat_u, lng_u, geo_coords):
-    best_step = None
-    best_dist = float('inf')
-    best_idx  = 0
+# ════════════════════════════════════════════════════
+#  LOGIKA UTAMA — Seperti Google Maps
+#
+#  1. Cari semua "titik belok" (step yang bukan LURUS/DEPART)
+#  2. Dari semua titik belok, cari yang paling dekat DI DEPAN user
+#  3. Hitung jarak user → titik belok tersebut
+#  4. Jika jarak > BELOK_RADIUS_M → tampilkan LURUS + jarak ke belok
+#  5. Jika jarak ≤ BELOK_RADIUS_M → tampilkan KANAN/KIRI sekarang!
+# ════════════════════════════════════════════════════
+def hitung_instruksi(steps, geo_coords, lat_u, lng_u, lat_t, lng_t, nama_tujuan):
 
-    for i, step in enumerate(steps):
+    # Cek apakah sudah sampai tujuan
+    jarak_tujuan = haversine(lat_u, lng_u, lat_t, lng_t)
+    if jarak_tujuan <= TIBA_RADIUS_M:
+        return f"NAV:TIBA:0m:{nama_tujuan[:20]}"
+
+    # ── Kumpulkan semua step dengan koordinat titik beloknya ──
+    step_data = []
+    for step in steps:
+        step_type = step.get('type', 6)
+        if step_type == 11:      # skip depart
+            continue
+
         wp_list = step.get('way_points', [])
         if not wp_list:
             continue
         wp_idx = wp_list[0]
-        if wp_idx < len(geo_coords):
-            # GeoJSON coordinates = [lng, lat]
-            s_lng = geo_coords[wp_idx][0]
-            s_lat = geo_coords[wp_idx][1]
-            dist  = haversine(lat_u, lng_u, s_lat, s_lng)
-            if dist < best_dist:
-                best_dist = dist
-                best_step = step
-                best_idx  = i
+        if wp_idx >= len(geo_coords):
+            continue
 
-    return best_step, best_dist, best_idx
+        # Koordinat titik awal step ini
+        coord   = geo_coords[wp_idx]
+        s_lng   = coord[0]
+        s_lat   = coord[1]
+
+        # Jarak dari user ke titik ini
+        jarak_ke_step = haversine(lat_u, lng_u, s_lat, s_lng)
+
+        step_data.append({
+            'type':      step_type,
+            'instruksi': step.get('instruction', ''),
+            'jarak_step': step.get('distance', 0),
+            'jalan':     step.get('name', '') or nama_tujuan,
+            'lat':       s_lat,
+            'lng':       s_lng,
+            'jarak_dari_user': jarak_ke_step
+        })
+
+    if not step_data:
+        return f"NAV:LURUS:{fmt_jarak(jarak_tujuan)}:{nama_tujuan[:20]}"
+
+    # ── Cari step belok TERDEKAT yang masih di DEPAN user ──
+    # "Di depan" = step dengan jarak_dari_user terkecil
+    # Sort berdasarkan jarak dari user
+    step_data.sort(key=lambda x: x['jarak_dari_user'])
+    step_terdekat = step_data[0]
+
+    arah_terdekat = deteksi_arah(
+        step_terdekat['instruksi'],
+        step_terdekat['type']
+    )
+    jarak_ke_belok = step_terdekat['jarak_dari_user']
+    jalan          = step_terdekat['jalan']
+
+    # ── Logika tampilan seperti Google Maps ──────────
+    if arah_terdekat == 'TIBA':
+        # Step arrive, cek jarak ke tujuan
+        if jarak_tujuan <= TIBA_RADIUS_M:
+            return f"NAV:TIBA:0m:{nama_tujuan[:20]}"
+        else:
+            return f"NAV:LURUS:{fmt_jarak(jarak_tujuan)}:{nama_tujuan[:20]}"
+
+    if jarak_ke_belok <= BELOK_RADIUS_M:
+        # ✅ SUDAH DEKAT titik belok → tampilkan instruksi belok
+        return f"NAV:{arah_terdekat}:{fmt_jarak(jarak_ke_belok)}:{jalan[:20]}"
+    else:
+        # 🔵 MASIH JAUH → tampilkan LURUS + jarak ke titik belok berikutnya
+        # Ini seperti Google Maps: "Lurus 500m kemudian belok kanan"
+        return f"NAV:LURUS:{fmt_jarak(jarak_ke_belok)}:{jalan[:20]}"
 
 
 # ── Parse respons GeoJSON ORS ─────────────────────────
@@ -118,52 +157,14 @@ def parse_rute(resp, nama_tujuan, lat_u, lng_u, lat_t, lng_t):
         return f"ERROR:ORS_{resp.status_code}|{resp.text[:80]}"
 
     data = resp.json()
-
-    # GeoJSON response struktur berbeda dari JSON biasa
-    # features[0].properties.segments[0].steps
-    # features[0].geometry.coordinates = array koordinat
     try:
-        props     = data['features'][0]['properties']
+        props      = data['features'][0]['properties']
         geo_coords = data['features'][0]['geometry']['coordinates']
-        steps     = props['segments'][0]['steps']
-        total_m   = props['summary']['distance']
+        steps      = props['segments'][0]['steps']
     except (KeyError, IndexError) as e:
-        return f"ERROR:PARSE_STRUKTUR|{str(e)}"
+        return f"ERROR:PARSE|{str(e)}"
 
-    if total_m <= TIBA_RADIUS_M:
-        return f"NAV:TIBA:0m:{nama_tujuan[:20]}"
-
-    # Cari step aktif
-    step_aktif, dist_ke_step, step_idx = cari_step_aktif(
-        steps, lat_u, lng_u, geo_coords
-    )
-    if not step_aktif:
-        step_aktif = steps[0]
-        step_idx   = 0
-
-    step_type = step_aktif.get('type', 6)
-    instruksi = step_aktif.get('instruction', '')
-    jarak     = step_aktif.get('distance', 0)
-    jalan     = step_aktif.get('name', '') or nama_tujuan
-
-    # Skip step DEPART → ambil step berikutnya
-    if step_type == 11 and step_idx + 1 < len(steps):
-        nxt       = steps[step_idx + 1]
-        step_type = nxt.get('type', 6)
-        instruksi = nxt.get('instruction', '')
-        jarak     = nxt.get('distance', 0)
-        jalan     = nxt.get('name', '') or nama_tujuan
-
-    arah = deteksi_arah(instruksi, step_type)
-
-    # Guard TIBA prematur — kalau ORS bilang TIBA tapi masih jauh
-    if arah == 'TIBA':
-        sisa = haversine(lat_u, lng_u, lat_t, lng_t)
-        if sisa > 50:
-            arah  = 'LURUS'
-            jarak = sisa
-
-    return f"NAV:{arah}:{fmt_jarak(jarak)}:{jalan[:20]}"
+    return hitung_instruksi(steps, geo_coords, lat_u, lng_u, lat_t, lng_t, nama_tujuan)
 
 
 # ═══════════════════════════════════════════════════
@@ -192,8 +193,6 @@ def nav():
             tlng = float(dlng)
         except:
             return "ERROR:FORMAT_KOORDINAT"
-        if haversine(lat_f, lng_f, tlat, tlng) <= TIBA_RADIUS_M:
-            return f"NAV:TIBA:0m:{dest[:20]}"
         try:
             resp = get_rute_ors(lat_f, lng_f, tlat, tlng)
             return parse_rute(resp, dest, lat_f, lng_f, tlat, tlng)
@@ -208,8 +207,6 @@ def nav():
     geo = geocode(dest)
     if not geo:
         return f"ERROR:TIDAK_DITEMUKAN|{dest}"
-    if haversine(lat_f, lng_f, geo['lat'], geo['lng']) <= TIBA_RADIUS_M:
-        return f"NAV:TIBA:0m:{geo['nama'][:20]}"
     try:
         resp = get_rute_ors(lat_f, lng_f, geo['lat'], geo['lng'])
         return parse_rute(resp, geo['nama'], lat_f, lng_f, geo['lat'], geo['lng'])
@@ -219,9 +216,7 @@ def nav():
         return f"ERROR:ROUTE|{str(e)[:100]}"
 
 
-# ═══════════════════════════════════════════════════
-#  ENDPOINT: /debug
-# ═══════════════════════════════════════════════════
+# ── Endpoints lain ───────────────────────────────────
 @app.route('/debug')
 def debug():
     lat  = request.args.get('lat',  '-7.6733')
@@ -232,24 +227,26 @@ def debug():
         resp = get_rute_ors(float(lat), float(lng), float(dlat), float(dlng))
         if resp.status_code != 200:
             return f"ORS_ERROR_{resp.status_code}|{resp.text[:300]}"
-
         data      = resp.json()
         props     = data['features'][0]['properties']
         steps     = props['segments'][0]['steps']
         geo_c     = data['features'][0]['geometry']['coordinates']
         total     = props['summary']['distance']
-
-        hasil  = f"TOTAL:{fmt_jarak(total)}|STEPS:{len(steps)}|GEO_COORDS:{len(geo_c)}\n---\n"
+        hasil = f"TOTAL:{fmt_jarak(total)}|STEPS:{len(steps)}\n---\n"
         for i, s in enumerate(steps):
-            arah = deteksi_arah(s.get('instruction',''), s.get('type', 6))
+            arah = deteksi_arah(s.get('instruction',''), s.get('type',6))
+            wp = s.get('way_points',[])
+            jarak_user = 0
+            if wp and wp[0] < len(geo_c):
+                c = geo_c[wp[0]]
+                jarak_user = haversine(float(lat), float(lng), c[1], c[0])
             hasil += (f"[{i}] type={s.get('type')} arah={arah} "
-                      f"jarak={fmt_jarak(s.get('distance',0))} "
-                      f"wp={s.get('way_points',[])} "
-                      f"ins={s.get('instruction','?')[:50]}\n")
+                      f"jarak_step={fmt_jarak(s.get('distance',0))} "
+                      f"jarak_dari_user={fmt_jarak(jarak_user)} "
+                      f"ins={s.get('instruction','?')[:45]}\n")
         return hasil
     except Exception as e:
         return f"ERROR|{str(e)}"
-
 
 @app.route('/cari')
 def cari():
@@ -260,7 +257,7 @@ def cari():
 
 @app.route('/test')
 def test():
-    return f"SERVER_OK|Fix:GeoJSON-endpoint|KeyLen:{len(ORS_KEY)}"
+    return f"SERVER_OK|Logika:GoogleMaps-style|Belok<={BELOK_RADIUS_M}m|Tiba<={TIBA_RADIUS_M}m|KeyLen:{len(ORS_KEY)}"
 
 @app.route('/testors')
 def testors():
@@ -271,5 +268,5 @@ def testors():
     except Exception as e:
         return f"ORS_ERROR|{e}"
 
-if __name__ == '__main__':
+#if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
