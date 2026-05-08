@@ -5,7 +5,7 @@ app = Flask(__name__)
 
 ORS_KEY         = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImMyZjlmYTk3YWYxODQyNmQ5YzUxZDkxMGFhYzA2OGMxIiwiaCI6Im11cm11cjY0In0="
 NOMINATIM_URL   = "https://nominatim.openstreetmap.org/search"
-ORS_GEOJSON_URL = "https://api.heigit.org/v2/directions/driving-car/geojson"
+ORS_GEOJSON_URL = "https://api.heigit.org/openrouteservice/v2/directions/driving-car/geojson"
 HEADERS_NOM     = {'User-Agent': 'MotoNavApp/1.0'}
 
 TIBA_RADIUS_M   = 10    # ≤ 8m dari tujuan → TIBA
